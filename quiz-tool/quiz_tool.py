@@ -231,7 +231,9 @@ def extract_question(client: anthropic.Anthropic, model: str, img_b64: str, medi
     usage.record(model, "extract", resp.usage, path)
     parsed = resp.parsed_output
     if parsed is None:
-        raise RuntimeError(f"no structured output (content type: {type(resp.content).__name__})")
+        blocks = getattr(resp, "content", None) or []
+        kinds = ", ".join(getattr(b, "type", type(b).__name__) for b in blocks) or "empty"
+        raise RuntimeError(f"model returned no structured output (stop_reason={getattr(resp, 'stop_reason', '?')}, content blocks: {kinds})")
     return parsed
 
 
@@ -249,11 +251,16 @@ def answer_question(client: anthropic.Anthropic, model: str, q: ExtractedQuestio
     usage.record(model, "answer", resp.usage, path)
     parsed = resp.parsed_output
     if parsed is None:
-        raise RuntimeError("no structured answer output")
+        blocks = getattr(resp, "content", None) or []
+        kinds = ", ".join(getattr(b, "type", type(b).__name__) for b in blocks) or "empty"
+        raise RuntimeError(f"model returned no structured output (stop_reason={getattr(resp, 'stop_reason', '?')}, content blocks: {kinds})")
     # Case-insensitive validation of returned labels against the options shown.
     valid = {o.label.upper() for o in q.options}
-    parsed.correct_labels = [l for l in (x.strip().upper() for x in parsed.correct_labels) if l in valid] \
-        or parsed.correct_labels
+    kept = [l for l in (x.strip().upper() for x in parsed.correct_labels) if l in valid]
+    if not kept and parsed.correct_labels:
+        print(f"  [answer] warning: model labels {parsed.correct_labels} do not match any option "
+              f"({sorted(valid)}); keeping as-is", file=sys.stderr)
+    parsed.correct_labels = kept or parsed.correct_labels
     return parsed
 
 
@@ -364,8 +371,9 @@ def main(argv: Optional[list[str]] = None) -> int:
                 results.append({**cached, "cached": True})
                 continue
 
-            img_b64 = base64.standard_b64encode(prepare_image(path, crop)[0]).decode()
-            q = extract_question(client, args.extract_model, img_b64, "image/png", usage, path.name)
+            img_bytes, media_type = prepare_image(path, crop)
+            img_b64 = base64.standard_b64encode(img_bytes).decode()
+            q = extract_question(client, args.extract_model, img_b64, media_type, usage, path.name)
             rec["extraction"] = q.model_dump()
             if args.answer and q.options:
                 a = answer_question(client, args.answer_model, q, usage, path.name)
